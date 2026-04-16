@@ -1,0 +1,1057 @@
+---
+title: "Advanced Modelling Project"
+author: "Anita Di Gennaro"
+date: "2026-03-12"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(tidyverse)
+library(GGally) 
+library(dplyr)
+library(factoextra) 
+library(DataExplorer)
+library(leaflet)
+library(olsrr)
+library(pls)
+library(pROC) 
+library(MASS)    
+library(e1071)   
+library(class)   
+library(nnet)  
+library(tree)         
+library(randomForest)  
+library(caret)         
+library(elasticnet)
+
+set.seed(240603)
+```
+
+
+## The Data
+
+For this research, a very comprehensive data set regarding the economic impact of wars was selected. It has 28 variables, comprising both categorical and continuous variables, and it encompasses both resolved and ongoing conflicts. For each conflict, the data set provides an array of information regarding different sectors and how the war impacted them. With the 'primary_country' variable, the data frame specifies to which of the countries involved in the conflict the information refers to.
+
+To conduct my research exploring the economic impacts of wars, the conflicts selected are the ongoing ones. This was done to gather a more contemporary and socially relevant investigation on the observed consequences of the current conflicts so far.  
+
+```{r data-load}
+data <- read.csv("war_economic_impact_dataset.csv")
+
+data_filtered <- data |> 
+  filter(Status == "Ongoing")
+
+data_filtered <- data_filtered |> 
+  dplyr::select(-c(Status, Conflict_Type, End_Year))
+```
+
+Given the focus on ongoing conflicts, the 'status' variable, as well as the 'end_year' variable were removed. I also removed the 'conflict_type' as I did not deem it a relevant information for this inquiry. 
+
+RESEARCH QUESTIONS: 
+This inquiry will investigate the economic effects of the ongoing conflicts, and how the involved countries are being affected. The humanitarian, economic and societal impacts of war need to be studied as a way to understand and shed light on the effects of war as a whole.  
+
+Regarding the target variables that will be at the center of this project, the regression models will be performed with 'Food_Insecurity_Rate' as the dependent variable, while the classification models will use 'War_Profiteering_Documented', a binary variable. 
+Hopefully, the analysis done through both classification and regression methods will provide a rounded understanding of the changes in food security and in war profiteering factors during war times, in ongoing conflicts.
+
+Food insecurity captures the humanitarian dimension of conflict, highlighting the swift changes that happen during war times and how the populations' conditions can worsen in a very short amount of time, often leading to humanitarian crises. War profiteering focuses on a more economical scope of war, but still important to understand its effects on a societal scale.
+
+## Data Cleaning and Exploration
+```{r initial-graphs}
+summary(data_filtered)
+
+plot_missing(data_filtered)
+plot_intro(data_filtered)
+```
+
+The data set presents no missing data. The majority of the columns are continuous. 
+
+From an initial summary it can be noticed that most ongoing conflicts have started after 2011, with the most recent conflict starting in 2025, between Iran and Israel, the 15-days war that here is marked as still ongoing given the most recent developments. The oldest war here started 1996, the Second Congo civil war. 
+
+As predictable, unemployment rates increase with the conflicts' development. This can be also seen by looking at the percentage points of unemployment spikes and youth unemployment rates. 
+The data set also provides poverty rates, both before and during the wars, as well as the food insecurity rates and the households that fell into poverty since the conflict's development. 
+The GDP change has all negative values, further showcasing the increase of poverty. The data set provides information regarding the changes within the black market as the wars started, among which the primary types of goods being sold and the market's activity levels. 
+
+### - exploratory graphs
+
+```{r graphs}
+plot_histogram(data_filtered)
+
+#food insecurity rate by region
+data_filtered |> 
+  ggplot(aes(x = reorder(Region, Food_Insecurity_Rate_., median), 
+             y = Food_Insecurity_Rate_., fill = Region)) +
+  geom_boxplot(alpha = 0.7, show.legend = FALSE) +
+  coord_flip() +
+  labs(
+    title = "Food Insecurity Rate by Region",
+    x = "", y = "Food Insecurity Rate (%)"
+  ) +
+  theme_minimal()
+
+#food insecurity rate by war profiteering documented
+data_filtered |> 
+  ggplot(aes(x = War_Profiteering_Documented, 
+             y = Food_Insecurity_Rate_., 
+             fill = War_Profiteering_Documented)) +
+  geom_boxplot(alpha = 0.7, show.legend = FALSE) +
+  labs(
+    title = "Food Insecurity Rate by War Profiteering",
+    x = "War Profiteering Documented", y = "Food Insecurity Rate (%)"
+  ) +
+  theme_minimal()
+```
+
+The histograms show that the most common pattern is a right-skewed distribution, showcasing that most conflicts cause moderate damage, but a small number of extreme conflicts drive more extreme outcomes. Few variables, like 'pre_war_poverty_rate' and 'informal_economy_size_during_war' show a more uniform distribution. 
+
+The main takeaways from an initial analysis distribution is the possible need of some transformation of the data to make it more normally distributed. 
+
+When looking at the box plot of food insecurity across regions, it ca be noted that the Middle East stands out with a longer tail and quite a lot of extreme, reflecting the severe humanitarian crises associated with conflicts such as the Israel-Palestine war and the Syrian civil war. 
+Africa and Europe show more contained distributions with lower median food insecurity rates, though both present notable outliers. While extreme food insecurity is less common in these regions, individual conflicts can still drive severe outcomes.
+The second box plot does not show substantial differences between the food insecurity rates where war profiteering is documented compared to where it isn't. 
+
+Correlations:
+```{r corr}
+GGally::ggcorr(data_filtered, label = T)
+```
+
+The correlation plot show very high correlation, as imaginable, for the economic indicators; more specifically regarding poverty rates and employment data. 
+The correlation presents in clusters, strongly affecting the economic variables, which are redundant in some cases, but then not present among the other numeric observations.  
+For the purpose of this research, I will most likely have to remove some of this highly correlated variables in order to reduce multicollinearity. 
+
+### - feature engineering 
+In order to reduce multicollinearity among economic variables and work with a cleaner data set, I will remove the redundant variables, and perform encoding and transformations where needed. 
+
+The data set presented some variables that measure change as two separate variables - divided in before and during the war. In order to capture the change while accounting for multicollinearity, one unique variable indicating the difference between pre and during war times will be created.
+The difference will be created for:
+
+- poverty
+
+- unemployment
+
+- informal economy size
+```{r mutating}
+data_clean <- data_filtered |>
+  mutate(
+    poverty = During_War_Poverty_Rate_. - Pre_War_Poverty_Rate_.,
+    informal_economy = Informal_Economy_Size_During_War_. - Informal_Economy_Size_Pre_War_.,
+    unemployment = During_War_Unemployment_. - Pre_War_Unemployment_.
+  ) |>
+  dplyr::select(-c(During_War_Poverty_Rate_., Pre_War_Poverty_Rate_.,
+            Unemployment_Spike_Percentage_Points, Pre_War_Unemployment_.,
+            During_War_Unemployment_., Informal_Economy_Size_Pre_War_.,
+            Informal_Economy_Size_During_War_., Extreme_Poverty_Rate_.))
+
+```
+
+Transforming and standardizing the numeric variables, ready for modelling:
+```{r transform}
+data_clean <- data_clean |>
+  mutate(
+    Households_Poverty_Estimate = log1p(Households_Fallen_Into_Poverty_Estimate),
+    Youth_Unemployment          = log1p(Youth_Unemployment_Change_.),
+    poverty                     = log1p(poverty),
+    unemployment                = log1p(unemployment)) |> 
+  dplyr::select(-c(Households_Fallen_Into_Poverty_Estimate,
+                   Youth_Unemployment_Change_.))
+
+#scale
+cols_to_scale <- c("GDP_Change_.", "Inflation_Rate_.", "Currency_Devaluation_.",
+                   "Cost_of_War_USD", "Estimated_Reconstruction_Cost_USD",
+                   "Currency_Black_Market_Rate_Gap_.", "informal_economy",
+                   "Households_Poverty_Estimate", "Youth_Unemployment",
+                   "poverty", "unemployment")
+
+data_clean <- data_clean |>
+  mutate(across(all_of(cols_to_scale), ~ as.numeric(scale(.))))
+
+#check distribution
+plot_histogram(data_clean)
+```
+
+The variable indicating the primary goods sold at the black market will be divided into 6 binary categories; each of them corresponding to one type of good that is among the major type sold in the black market. 
+
+Similarly, the 'war_profiteering_documented' variable will be turned into a dummy variable, since the possible values are Yes and No.
+```{r binary-vars}
+data_clean <- data_clean |>
+  mutate(
+    food     = as.integer(str_detect(Primary_Black_Market_Goods, "food")),
+    fuel     = as.integer(str_detect(Primary_Black_Market_Goods, "fuel")),
+    medicine = as.integer(str_detect(Primary_Black_Market_Goods, "medicine")),
+    weapons  = as.integer(str_detect(Primary_Black_Market_Goods, "weapons")),
+    water    = as.integer(str_detect(Primary_Black_Market_Goods, "water")),
+    currency = as.integer(str_detect(Primary_Black_Market_Goods, "currency"))
+    ) |>
+  dplyr::select(-Primary_Black_Market_Goods)
+```
+
+
+Lastly, the 'Black_Market_Activity_level' and 'war_Profiteering_Documented' variable will be turned into factors. 
+
+```{r encoding}
+data_clean <- data_clean |>
+  mutate(Black_Market_Activity_Level = factor(
+    Black_Market_Activity_Level, levels = c("Low", "Moderate", "High",
+                                            "Dominant")),
+    War_Profiteering_Documented = factor(War_Profiteering_Documented,
+    levels = c("No", "Yes"))
+  )
+```
+
+The final data set that I will work with, will then have 25 variables and over 50.000 observations. 
+
+## Classification Model: explanation 
+For this first classification model, I will explore the variables that influence my target variable, documented war profiteering.
+
+For this first part of the classification models, I will use the probabilistic learning methods and Knn. My target variable is binary, and I will start with a simple logistic model.
+
+First of all, check for the dependent variable's distribution among classes.
+
+```{r balance-check}
+table(data_clean$War_Profiteering_Documented)
+prop.table(table(data_clean$War_Profiteering_Documented))
+```
+
+From these first glance at the target variable's distribution, I can already notice that my classes are not balanced, with about 70% of the observations belonging to the 'yes' class. 
+
+Now for the models, I will start with a simple logistic regression, to then move forward with more complex methods, such as LDA and decision trees. 
+
+### - logistic regression 
+A first logistic regression will be performed, to then be followed by a stepwise selection by AIC, to keep the most relevant predictors. 
+```{r data-split-regression}
+data_idx <- createDataPartition(data_clean$War_Profiteering_Documented, 
+                                p = 0.7, list = FALSE)
+data_train <- data_clean[data_idx, ]
+data_test  <- data_clean[-data_idx, ]
+
+cat("Train:", nrow(data_train), "| Test:", nrow(data_test), "\n")
+
+#logistic regression
+logit_full  <- glm(War_Profiteering_Documented ~ .,
+                   family = binomial(link = "logit"), 
+                   data = data_train, trace = FALSE)
+
+logit_step  <- step(logit_full, direction = "both", trace = 0)
+```
+
+The AIC metric is similar in both models, suggesting that the stepwise variable selection was performed without hindering the model's predictive power. By looking at the extremely small difference between the null and the residual deviances, we can deduct that the model does not actually explain much. 
+
+The step logistic model selected three main relevant predictors when examining the documented war profiteering in ongoing conflicts: GDP change, inflation rate and the presence of water in the black market.
+All of the selected predictors do show a weak positive explanatory power, meaning that, keeping all other variables constant, each predictor slightly increases war profiteering. 
+The restricted amount significant predictors could be a result of the data set's context and its relevance: war profiteering in real-world scenarios is hard to predict from aggregate economic indicators alone.
+
+Hopefully, by relying on more complex models and balancing the classes through cost-sensitive analysis, the predictions will increase in accuracy and lead to more interesting results. 
+
+## Classification Model: modelling and prediction
+
+To improve the prediction power and to test different models, LDA, QDA, Naive Bayes and Knn methods will be adopted.
+Further analysis will rely on decision trees, random forest and bagging methods, cost-sensitive analysis, and a simple neural network.
+
+### - LDA, Naive-Bayes and Knn
+
+The QDA method, when trying to run it with all predictors, would give an error indicating that there is a rank deficiency in the 'No' class; too many correlated predictors for QDA to to run correctly. 
+For this reason, QDA was fitted using only the stepwise-selected predictors, saved as 'stepwise_formula' of relevant indicators, that allowed it to work.
+
+```{r classification-models}
+set.seed(240603)
+#stepwise-selected predictors
+stepwise_formula <- formula(logit_step)
+
+#LDA
+lda <- MASS::lda(War_Profiteering_Documented ~ ., data = data_train)
+lda_pred <- predict(lda, newdata = data_test)$class
+
+#QDA
+qda <- MASS::qda(stepwise_formula, data = data_train)
+qda_pred <- predict(qda, newdata = data_test)$class
+
+#Naive Bayes
+nb   <- e1071::naiveBayes(War_Profiteering_Documented ~ ., data = data_train)
+nb_pred <- predict(nb, newdata = data_test)
+
+#k-NN: Scaling + model predictions
+#using the numeric columns in my data 
+numeric_cols <- c("GDP_Change_.", "Inflation_Rate_.", "poverty",
+                  "unemployment", "Food_Insecurity_Rate_.",
+                  "informal_economy", "Currency_Devaluation_.",
+                  "Currency_Black_Market_Rate_Gap_.")
+
+train_scaled <- scale(data_train[, numeric_cols])
+test_scaled <- scale(
+  data_test[, numeric_cols],
+  center = attr(train_scaled, "scaled:center"),
+  scale = attr(train_scaled, "scaled:scale")
+)
+
+#k-NN predictions for different k values
+knn_pred_k1 <- class::knn(
+  train = train_scaled,
+  test  = test_scaled,
+  cl    = data_train$War_Profiteering_Documented,
+  k     = 1
+)
+
+knn_pred_k5 <- class::knn(
+  train = train_scaled,
+  test  = test_scaled,
+  cl    = data_train$War_Profiteering_Documented,
+  k     = 5
+)
+
+knn_pred_k20 <- class::knn(
+  train = train_scaled,
+  test  = test_scaled,
+  cl    = data_train$War_Profiteering_Documented,
+  k     = 20
+)
+```
+
+The confusion matrices will be obtained and the summary tables as well, to compare and evaluate the different methods. 
+
+```{r confusion-matrix-summary-tables}
+#specifying the positive class
+cm_lda <- confusionMatrix(lda_pred, data_test$War_Profiteering_Documented, 
+                          positive = "Yes")
+cm_nb <- confusionMatrix(nb_pred,  data_test$War_Profiteering_Documented, 
+                          positive = "Yes")
+cm_knn_k1 <- confusionMatrix(knn_pred_k1,  data_test$War_Profiteering_Documented, 
+                               positive = "Yes")
+cm_knn_k5 <- confusionMatrix(knn_pred_k5,  data_test$War_Profiteering_Documented, 
+                               positive = "Yes")
+cm_knn_k20 <- confusionMatrix(knn_pred_k20, data_test$War_Profiteering_Documented, 
+                               positive = "Yes")
+
+
+cm_lda
+cm_nb
+cm_knn_k1
+cm_knn_k5
+cm_knn_k20
+
+#summary tables
+summary <- tibble(
+  Method = c("LDA", "Naive Bayes", "k-NN (k=1)",
+             "k-NN (k=5)", "k-NN (k=20)"),
+  Accuracy = c(
+    as.numeric(cm_lda$overall["Accuracy"]),
+    as.numeric(cm_nb$overall["Accuracy"]),
+    as.numeric(cm_knn_k1$overall["Accuracy"]),
+    as.numeric(cm_knn_k5$overall["Accuracy"]),
+    as.numeric(cm_knn_k20$overall["Accuracy"])
+  )
+)
+
+knitr::kable(summary, digits = 3)
+```
+
+LDA, QDA and Naive Bayes predict everything as 'Yes', showing a consistent 1.0 Specificity and 0.0 Sensitivity. Their limited prediction ability and their positive bias is probably a direct effect of the classes' unbalance. 
+
+The Knn models show that, as k increases, sensitivity rises and specificity collapses. The models have a tendency to classify only the positive class. 
+The models minimize errors.
+The classes' imbalance is the main cause of the model's predictive bias, that steers them towards classifying everything to the 'Yes' class.
+
+### - decision threshold and cost-sensitive analysis
+Given the results of the previous analysis, class imbalance needs to be addressed through threshold adjustment and, if needed, cost sensitive analysis. 
+
+When predicting war profiteering, flagging an expense as a false negative - so failing to identify an instance of war profiteering - is more costly than mistaking something as profiteering when it isn't; a false alarm (false positive). Therefore, when doing cost-sensitive analysis and determining the matrix, missing profiteering will have to be more costly than a false positive - which is still costly but less damaging. 
+
+Let's first try by adjusting the decision threshold:
+```{r threshold-adjustments}
+#profiteering as a numeric vector - from the stepwise logistic regression
+probs_logit <- predict(logit_step, newdata = data_test, type = "response")
+
+
+#evaluate different thresholds
+thresholds <- seq(0.05, 0.95, by = 0.05)
+threshold_results <- data.frame()
+
+for (thresh in thresholds) {
+  pred <- factor(
+    ifelse(probs_logit > thresh, "Yes", "No"), #yes = war profiteering
+    levels = c("No", "Yes")
+  )
+  
+  cm <- confusionMatrix(pred, data_test$War_Profiteering_Documented, 
+                        positive = "Yes")
+  
+  threshold_results <- rbind(threshold_results, data.frame(
+    Threshold   = thresh,
+    Accuracy    = as.numeric(cm$overall["Accuracy"]),
+    Sensitivity = as.numeric(cm$byClass["Sensitivity"]),
+    Specificity = as.numeric(cm$byClass["Specificity"])
+  ))
+}
+
+#visualization
+threshold_results |>
+  pivot_longer(cols = -Threshold, names_to = "Metric", values_to = "Value") |>
+  ggplot(aes(x = Threshold, y = Value, color = Metric)) +
+  geom_line(linewidth = 1) +
+  geom_point(size = 2) +
+  labs(
+    title = "Effect of Decision Threshold on Classification Metrics",
+    subtitle = "Lower threshold = more profiteering detected, but more false positives",
+    x = "Probability Threshold", y = "Metric Value"
+  ) +
+  theme_minimal() +
+  scale_color_viridis_d()
+```
+
+This graphs shows that the logistic model predicts everything as 'Yes' until the 70% threshold is reached, point at which the predictions drastically switch to 'No'. The logistic model does not seem to have a good discriminatory power to rightfully classify the observations. No threshold produces a meaningful separation between classes.
+This finding suggests that threshold adjustment is not enough to correct the model's classification power, therefore leading to cost-sensitive learning. 
+
+Now cost-sensitive learning will be applied, but the first step is to define some helper functions:
+
+```{r helper-functions}
+#decision threshold from the cost matrix in binary classification
+#c00: TN cost, c01: FP cost, c10: FN cost, c11: TP cost
+theoretical_threshold <- function(c01, c10, c00 = 0, c11 = 0) {
+  numerator <- c01 - c00
+  denominator <- (c01 - c00) + (c10 - c11)
+
+  if (denominator <= 0) {
+    stop("Invalid costs: denominator must be positive.")
+  }
+
+  numerator / denominator
+}
+
+#expected cost using a cost matrix; rows = actual class, columns = predicted class
+expected_cost <- function(pred, actual, cost_matrix, normalize = TRUE) {
+
+  actual <- factor(actual, levels = rownames(cost_matrix))
+  pred <- factor(pred, levels = colnames(cost_matrix))
+
+  cm <- table(actual, pred)
+  total_cost <- sum(cm * cost_matrix)
+
+  if (normalize) total_cost / sum(cm) else total_cost
+}
+```
+
+Defining the cost matrix:
+```{r cost-matrix}
+#rows = actual class, columns = predicted class
+cost_matrix <- matrix(c(
+  0,  10,           #false positive; false alarm: TN = 0, FP = 10
+  90, 0            #actual war profiteering: FN = 90, TP = 0
+), nrow = 2, byrow = TRUE,
+dimnames = list(
+  Actual = c("No", "Yes"),
+  Predicted = c("No", "Yes")
+))
+
+cat("Cost Matrix:\n")
+print(cost_matrix)
+```
+
+Theoretical threshold derivation and evaluation:
+```{r threshold-derivation}
+c00 <- cost_matrix["No", "No"]   # TN = 0
+c01 <- cost_matrix["No", "Yes"]  # FP = 10
+c10 <- cost_matrix["Yes", "No"]  # FN = 90
+c11 <- cost_matrix["Yes", "Yes"] # TP = 0
+
+p_star_theory <- theoretical_threshold(c01 = c01, c10 = c10, c00 = c00, c11 = c11)
+cat(sprintf("Theoretical threshold: %.3f\n", p_star_theory))
+
+```
+
+This first theoretical threshold is 0.10, meaning that any value assigned a probability of profiteering higher than 10% will be flagged.
+The threshold is low because missing a real case of war profiteering (also given the strongly negative humanitarian effects that these profits usually equal to in societies at war) is more costly and dangerous than mis-identifing a false positive case.
+
+Now for the optimal threshold: 
+```{r optimal-threshold}
+# Sweep thresholds and compute expected cost
+cost_results <- data.frame()
+
+for (thresh in thresholds) {
+  pred <- factor(
+    ifelse(probs_logit > thresh, "Yes", "No"),
+    levels = c("No", "Yes")
+  )
+  
+  cost_val <- expected_cost(
+    pred        = pred,
+    actual      = data_test$War_Profiteering_Documented,
+    cost_matrix = cost_matrix,
+    normalize   = TRUE
+  )
+  
+  cost_results <- rbind(cost_results, data.frame(
+    Threshold     = thresh,
+    Expected_Cost = cost_val
+  ))
+}
+
+#optimal threshold
+optimal_thresh <- cost_results$Threshold[which.min(cost_results$Expected_Cost)]
+
+cat("Cost-optimal threshold:", optimal_thresh, "\n")
+cat("Minimum expected cost:", round(min(cost_results$Expected_Cost), 3), "\n")
+cat("Theoretical threshold:", round(p_star_theory, 3), "\n")
+
+#visualize
+ggplot(cost_results, aes(x = Threshold, y = Expected_Cost)) +
+  geom_line(color = "steelblue", linewidth = 1) +
+  geom_point(color = "steelblue", size = 2) +
+  geom_vline(xintercept = optimal_thresh, linetype = "dashed", color = "red") +
+  geom_vline(xintercept = p_star_theory, linetype = "dotted", color = "darkgreen") +
+  annotate("text", x = optimal_thresh + 0.07,
+           y = max(cost_results$Expected_Cost) * 0.9,
+           label = paste("Optimal =", optimal_thresh), color = "red", size = 3.5) +
+  annotate("text", x = p_star_theory + 0.07,
+           y = max(cost_results$Expected_Cost) * 0.8,
+           label = paste("Theoretical =", round(p_star_theory, 2)),
+           color = "darkgreen", size = 3.5) +
+  labs(
+    title = "Expected Cost vs Decision Threshold",
+    subtitle = "War Profiteering: FN cost = 90, FP cost = 10",
+    x = "Probability Threshold", y = "Expected Cost per Observation"
+  ) +
+  theme_minimal()
+
+cat("Cost-optimal threshold:", optimal_thresh, "\n")
+cat("Minimum expected cost:", min(cost_results$Expected_Cost), "\n")
+cat("Theoretical threshold from cost matrix:", round(p_star_theory, 3), "\n")
+```
+
+The optimal threshold suggested is 0.5, so going even lower seems to be the optimal choice to actively minimize cost. This lower threshold is consistent with the model's tendency of clustering the observations in the positive class.
+
+In order to move on to the decision trees and the further methods, I want to ensure that the target varaible's classes are balanced. Resampling will be performed and the optima threshold will be used.
+```{r resampling}
+train_x <- data_train |> dplyr::select(-War_Profiteering_Documented)
+train_y <- data_train$War_Profiteering_Documented
+
+train_down <- downSample(x = train_x, y = train_y, yname = "War_Profiteering_Documented")
+train_up   <- upSample(x = train_x,   y = train_y, yname = "War_Profiteering_Documented")
+
+ctrl_resample <- trainControl(method = "cv", number = 5, classProbs = TRUE)
+
+logit_down <- train(War_Profiteering_Documented ~ ., data = train_down, method = "glm",
+                    family = binomial(), trControl = ctrl_resample)
+logit_up   <- train(War_Profiteering_Documented ~ ., data = train_up,   method = "glm",
+                    family = binomial(), trControl = ctrl_resample)
+
+prob_base <- probs_logit
+prob_down <- predict(logit_down, data_test, type = "prob")[, "Yes"]
+prob_up   <- predict(logit_up,   data_test, type = "prob")[, "Yes"]
+
+pred_base <- factor(ifelse(prob_base >= 0.5, "Yes", "No"), levels = c("No", "Yes"))
+pred_down <- factor(ifelse(prob_down >= 0.5, "Yes", "No"), levels = c("No", "Yes"))
+pred_up   <- factor(ifelse(prob_up   >= 0.5, "Yes", "No"), levels = c("No", "Yes"))
+
+cm_base <- confusionMatrix(pred_base, data_test$War_Profiteering_Documented, positive = "Yes")
+cm_down <- confusionMatrix(pred_down, data_test$War_Profiteering_Documented, positive = "Yes")
+cm_up   <- confusionMatrix(pred_up,   data_test$War_Profiteering_Documented, positive = "Yes")
+
+resampling_results <- tibble(
+  Strategy = c("No resampling", "Downsampling", "Oversampling"),
+  Accuracy    = c(cm_base$overall["Accuracy"],    cm_down$overall["Accuracy"],    cm_up$overall["Accuracy"]),
+  Sensitivity = c(cm_base$byClass["Sensitivity"], cm_down$byClass["Sensitivity"], cm_up$byClass["Sensitivity"]),
+  Specificity = c(cm_base$byClass["Specificity"], cm_down$byClass["Specificity"], cm_up$byClass["Specificity"]),
+  Precision   = c(cm_base$byClass["Precision"],   cm_down$byClass["Precision"],   cm_up$byClass["Precision"]),
+  Expected_Cost = c(
+    expected_cost(pred_base, data_test$War_Profiteering_Documented, cost_matrix),
+    expected_cost(pred_down, data_test$War_Profiteering_Documented, cost_matrix),
+    expected_cost(pred_up,   data_test$War_Profiteering_Documented, cost_matrix)
+  )
+)
+
+knitr::kable(resampling_results, digits = 3,
+             caption = "Resampling Strategies at Threshold 0.5")
+```
+
+Resampling produces a more balanced classifier; both downsampling and oversampling achieve almost equal sensitivity and specificity, around 0.50. 
+The model does not default to the majority class, as it did previously. However, the expected cost rises sharply compared to the no-resampling baseline. 
+In conclusion, cost-sensitive learning and balancing classes improved fairness of predictions but did not necessarily minimize expected cost under strongly asymmetric penalties. 
+
+Now I will move onto tree-based methods, which ideally better capture the non-linear structure of the data and achieve a more favorable balance between sensitivity and cost.
+
+### - trees-based methods
+ 
+For the trees-based methods, developed to complete this classification analysis, I will use the sampled data set (train_down; which seemed to be the better performing one)
+```{r decision-tree}
+#tree
+war_profiteering_tree <- tree(
+  War_Profiteering_Documented ~ .,
+  data    = train_down,
+  control = tree.control(
+    nobs    = nrow(train_down),
+    mindev  = 0.001, #lower for high volume data
+    minsize = 10
+  )
+)
+
+summary(war_profiteering_tree)
+```
+
+The decision tree, even when trained on the balanced downsampled data set and with a  low splitting threshold, fails to find meaningful splits, therefore leading me to attempt more complex tree-structures, such as bagging random forest.
+
+
+```{r bagging}
+p_war <- ncol(train_down) - 1
+
+set.seed(240603)
+war_bag <- randomForest(
+  War_Profiteering_Documented ~ .,
+  data       = train_down,
+  mtry       = p_war,
+  ntree      = 500,
+  importance = TRUE
+)
+war_bag
+
+war_bag_pred <- predict(war_bag, newdata = data_test, type = "class")
+cm_bag <- confusionMatrix(war_bag_pred, data_test$War_Profiteering_Documented,
+                          positive = "Yes")
+cm_bag
+
+```
+
+Bagging produced a more balanced classifier, with sensitivity and specificity around 50% each. 
+However, the accuracy and balanced accuracy are around 0.50, indicating that the performance is no better than random chance.
+The OOB error rate of approximately 49% confirms this finding. This suggests that the available predictors, which are mostly aggregate economic indicators, have very little systematic capability of predicting documented war profiteering, regardless of the model's complexity.
+
+Finally, random forest will be attempted, as well as the two methods' comparison (bagging and random forest, as the decision tree did not give any significant result, producing only one node).
+```{r random-forest}
+set.seed(240603)
+
+war_rf <- randomForest(
+  War_Profiteering_Documented ~ .,
+  data       = train_down,
+  mtry       = floor(sqrt(p_war)),
+  ntree      = 500,
+  importance = TRUE
+)
+war_rf
+
+war_rf_pred <- predict(war_rf, newdata = data_test, type = "class")
+cm_rf <- confusionMatrix(war_rf_pred, data_test$War_Profiteering_Documented,
+                         positive = "Yes")
+cm_rf
+
+
+#OOB curve
+tibble(
+  trees     = seq_len(nrow(war_rf$err.rate)),
+  oob_error = war_rf$err.rate[, "OOB"]
+) |>
+  ggplot(aes(x = trees, y = oob_error)) +
+  geom_line(color = "darkorange", linewidth = 1) +
+  labs(title = "Random Forest OOB error curve",
+       x = "Number of trees", y = "OOB error rate") +
+  theme_minimal()
+
+
+#model comparison
+extract_metrics <- function(cm, model_name) {
+  tibble(
+    Model               = model_name,
+    Accuracy            = as.numeric(cm$overall["Accuracy"]),
+    Sensitivity         = as.numeric(cm$byClass["Sensitivity"]),
+    Specificity         = as.numeric(cm$byClass["Specificity"]),
+    `Balanced Accuracy` = as.numeric(cm$byClass["Balanced Accuracy"])
+  )
+}
+
+tree_results <- bind_rows(
+  extract_metrics(cm_bag,    "Bagging"),
+  extract_metrics(cm_rf,     "Random Forest")
+)
+
+knitr::kable(tree_results, digits = 3)
+
+tree_results |>
+  pivot_longer(cols = -Model, names_to = "Metric", values_to = "Value") |>
+  ggplot(aes(x = reorder(Model, Value), y = Value, fill = Metric)) +
+  geom_col(position = "dodge") +
+  coord_flip() +
+  ylim(0, 1) +
+  labs(title = "War Profiteering: tree model comparison", x = "", y = "Score") +
+  theme_minimal()
+```
+
+Random forest has little to no difference compared to the bagging method, with accuracy, sensitivity, specificity and balanced accuracy all converging at approximately 0.50.
+
+In conclusion, the economic indicators available in this data set do not contain sufficient predictive power to correctly classify documented war profiteering. War profiteering is most likely driven by contextual, institutional, and political factors that macroeconomic variables are not able to capture. 
+
+## Regression Model: explanation 
+For this first part of the regression model, the focus will be on a simple OLS regression model and its interpretation. The best subset selection will also be performed in this first part.
+The following part (modelling and prediction) will  focus on different models, regularization models to be specific, and it will dive deeper into models' evaluation and prediction power. 
+
+The target variable of this advanced regression model is 'Food_Insecurity_Rate', and because of the different type of analysis that this dependent variable will require, the 'data_clean' set will be used. 
+
+```{r split_data}
+set.seed(240603)  
+in_train <- createDataPartition(data_clean$Food_Insecurity_Rate_., p = 0.75, list = FALSE)
+training <- data_clean[in_train, ]
+testing  <- data_clean[-in_train, ]
+
+cat("Training set:", nrow(training), "observations\n")
+cat("Testing set:", nrow(testing), "observations\n")
+```
+
+Correlations. 
+```{r plot_correlations}
+GGally::ggcorr(training, label = T)
+```
+
+The data does not look strongly related, besides some variables that show very high values of correlation, such as poverty and unemployment. The variables representing the most sold goods in the black market show a very small negative correlation.
+
+Now an initial regression set up will be created. It will rely on the OLS method to minimize the sum of squared residuals. The variables were already transformed, so I do not apply any kind of transformation here. 
+
+```{r fit_ols_baseline}
+linFit <- lm(Food_Insecurity_Rate_. ~ GDP_Change_. + Inflation_Rate_. + 
+  Currency_Devaluation_. + Cost_of_War_USD + Estimated_Reconstruction_Cost_USD +
+  Currency_Black_Market_Rate_Gap_. + War_Profiteering_Documented +
+  poverty + informal_economy + unemployment +
+  Households_Poverty_Estimate + Youth_Unemployment +
+  food + fuel + medicine + weapons + water + currency,
+  data = training)
+
+summary(linFit)
+```
+
+From this first model, we can see that the variables with the strongest significance in predicting Food Insecurity rates are poverty, unemployment, as well as GDP change. 
+The Adjusted R2 suggests that the model is able to account for approximately 54% of the model's variance. 
+
+To gain a clearer perspective of the model's performance, the linear model will also be evaluated through the testing set as well:
+
+```{r model_evaluation}
+pred_linFit <- predict(linFit, newdata = testing)
+cat("Test R^2:", round(cor(testing$Food_Insecurity_Rate_., pred_linFit)^2, 3), "\n")  
+```
+
+The R2 of the testing set corresponds to the training set's one (54%), indicating that the model's performance is stable. 
+
+### - best sub-set selection
+
+Now, the predictions will be stored in a separate object and the set up for the cross-validation will be done. 
+```{r}
+#store predictions against actual values
+test_results <- data.frame(actual = testing$Food_Insecurity_Rate_.)
+
+#model complexity
+model_p <- c()
+
+#helper function
+register_model <- function(name, pred, p) {
+  test_results[[name]] <<- as.numeric(pred)
+  model_p[[name]] <<- as.integer(p)
+}
+
+#5-fold cross validation
+ctrl <- trainControl(method = "repeatedcv", number = 5, repeats = 1)
+```
+
+Thorough this step, I have established data sets and functions that will help me later to categorize and compare the best model. 
+
+OLS baseline:
+ 
+```{r}
+register_model(
+  name = "OLS_baseline",
+  pred = predict(linFit, newdata = testing),
+  p    = length(coef(linFit))
+)
+```
+
+### - AIC
+To gather a more complete understanding of the model's performance, the AIC and BIC will be gathered and analyzed.
+
+Given the big size of the data set, I will directly rely upon the forward selection method using the AIC. By doing this, the most relevant predictors will be kept and automatically selected by the AIC measure. 
+
+```{r forward_stepwise_aic}
+forward_AIC <- ols_step_forward_aic(linFit)
+forward_AIC
+
+
+register_model(
+  name = "forward_AIC",
+  pred = predict(forward_AIC$model, newdata = testing),
+  p = length(coef(forward_AIC$model))
+)
+postResample(pred = test_results$forward_AIC, obs = test_results$actual)
+```
+
+This first forward stepwise method only selected 6 relevant predictors for the target variable, food insecurity. The most important predictor is poverty, 1-unit increase in poverty is associated with about 10% increase in food insecurity. Unemployment is also a relevant indicator, although not as strong as poverty. The presence of a highly negative beta for youth unemployment is most likely related to the possible presence of multicollinearity between the variables. 
+
+The presence of weapons in the black market are also important when predicting food insecurity rate, but still not as significant as unemployment or poverty. 
+The negative betas for the remaining variables, GDP change and War Profiteering Documented, show that a decrease in both indicators causes an increase of food insecurity. 
+
+The model's R squared confirms the 54% variance explained, maintaining stable compared to the original model.
+
+Now the same process will be done, but a layer of specificity will be added to provide more stable results. 
+
+```{r stepwise_aic}
+both_AIC <- ols_step_both_aic(linFit)
+both_AIC
+
+register_model(
+  name = "both_AIC",
+  pred = predict(both_AIC$model, newdata = testing),
+  p = length(coef(both_AIC$model))
+)
+postResample(pred = test_results$both_AIC, obs = test_results$actual)
+```
+
+This model does not show any significant results, compared to the previous attempt.
+
+Last stepwise selection attempt using a different method: 
+
+```{r forward_stepwise_cv}
+
+for_tune <- train(Food_Insecurity_Rate_. ~ GDP_Change_. + Inflation_Rate_. +
+                  Currency_Devaluation_. + Cost_of_War_USD +
+                  Estimated_Reconstruction_Cost_USD +
+                  Currency_Black_Market_Rate_Gap_. + War_Profiteering_Documented +
+                  poverty + informal_economy + unemployment +
+                  Households_Poverty_Estimate + Youth_Unemployment +
+                 food + fuel + medicine + weapons + water + currency,
+                 data = training,
+                 method = "leapForward",
+                 preProc = c('nzv','scale', 'center'),
+                 tuneGrid = expand.grid(nvmax = 4:10),
+                 trControl = ctrl)
+
+plot(for_tune)
+cat("Best number of variables:", for_tune$bestTune$nvmax, "\n")
+coef(for_tune$finalModel, for_tune$bestTune$nvmax)
+
+register_model(
+  name = "forward_CV",
+  pred = predict(for_tune, testing),
+  p = length(coef(for_tune$finalModel, for_tune$bestTune$nvmax))
+)
+postResample(pred = test_results$forward_CV, obs = test_results$actual)
+```
+
+This model specifically identifies the best number of predictors, which here seems to be 9. Compared to the previous cases, this method adds currency devaluation, water, and fuel. 
+The R2 is unchanged.
+
+Overall, for this initial OLS model, the number of predictors that are suggested to understand the changes and influences on food insecurity in war countries is low - ranging from 6 to 9 relevant variables.
+
+## Regression Model: modelling and prediction
+In order to effectively do model comparison, the Ridge and Lasso penalized regressions, and finally Principal Component Regression and Partial Least Squares. 
+
+### - Ridge Regression
+
+All coefficients will be shrunk close to zero. 
+```{r Ridge}
+set.seed(240603)
+
+ModelF <- Food_Insecurity_Rate_. ~ GDP_Change_. + Inflation_Rate_. + 
+  Currency_Devaluation_. + Cost_of_War_USD + Estimated_Reconstruction_Cost_USD +
+  Currency_Black_Market_Rate_Gap_. + War_Profiteering_Documented +
+  poverty + informal_economy + unemployment +
+  Households_Poverty_Estimate + Youth_Unemployment +
+  food + fuel + medicine + weapons + water + currency
+
+ridge_grid <- expand.grid(lambda = 10^seq(-6, 2, length.out = 50)) #lambda values
+
+ridge_tune <- train(ModelF,
+                    data = training,
+                    method = "ridge",
+                    preProc = c("scale", "center"),
+                    tuneGrid = ridge_grid,
+                    trControl = ctrl)
+
+plot(ridge_tune, xTrans = log10, xlab = "log10(lambda)")
+cat("Best lambda for Ridge:", ridge_tune$bestTune$lambda, "\n")
+
+register_model(
+  name = "ridge",
+  pred = predict(ridge_tune, testing),
+  p = length(attr(ridge_tune$terms, "term.labels"))
+)
+postResample(pred = test_results$ridge, obs = test_results$actual)
+```
+The optimal lambda value suggested by the model is very small, approximately 0.00013, suggesting that the Ridge regression does not apply a strong shrinkage to the coefficients. 
+
+The model's metrics are also similar to the ones got with the original OLS, with a stable R2 at 0.54. This confirms that Ridge did not apply such a strong penalization, and the result is therefore quite similar to the original baseline OLS model.
+
+
+### - Lasso regression
+
+This shrinks the coefficients to zero.
+```{r Lasso}
+lasso_grid <- expand.grid(fraction = seq(0.01, 1, length.out = 20))
+
+lasso_tune <- train(ModelF,
+                    data = training,
+                    method = "lasso",
+                    preProc = c("scale", "center"),
+                    tuneGrid = lasso_grid,
+                    trControl = ctrl)
+
+plot(lasso_tune)
+cat("Best lambda for Lasso:", lasso_tune$bestTune$fraction, "\n")
+
+register_model(
+  name = "lasso",
+  pred = predict(lasso_tune, testing),
+  p = length(attr(lasso_tune$terms, "term.labels"))
+)
+postResample(pred = test_results$lasso, obs = test_results$actual)
+```
+The best lambda according to this model is 1, and the model's metrics are all the same for the original OLS model. 
+Similarly to Ridge's case, the best lambda suggests the coefficients were barely shrunk and that the penalization methods, in this case, did not improve performance. 
+
+
+### - PCR and PLS
+
+PCR and PLS reduce the dimensionality of the model. 
+First, the data for these models will be set up. 
+```{r dimensionality-reduction-setup}
+set.seed(240603)
+
+#data matrices with the full model formula
+x_train_dr <- model.matrix(ModelF, data = training)[, -1, drop = FALSE]
+x_test_dr  <- model.matrix(ModelF, data = testing)[, -1, drop = FALSE]
+
+#standardize the data
+pp <- preProcess(x_train_dr, method = c("center", "scale"))
+x_train_dr <- predict(pp, x_train_dr)
+x_test_dr  <- predict(pp, x_test_dr)
+
+pcr_train_df <- data.frame(Food_Insecurity_Rate_. =
+                           training$Food_Insecurity_Rate_., x_train_dr,
+                           check.names = FALSE)
+pcr_test_df  <- data.frame(x_test_dr, check.names = FALSE)
+```
+
+Now, the Principal Components Regression can run.
+```{r pcr}
+pcr_fit <- pcr(Food_Insecurity_Rate_. ~ .,
+               data = pcr_train_df,
+               scale = FALSE, validation = "CV")
+
+pcr_cv <- drop(RMSEP(pcr_fit, estimate = "CV")$val[1, 1, -1])
+pcr_ncomp <- pls::selectNcomp(pcr_fit, method = "onesigma", plot = TRUE)
+cat("Best number of components (PCR):", pcr_ncomp, "\n")
+
+register_model(
+  name = "pcr",
+  pred = drop(predict(pcr_fit, newdata = pcr_test_df, ncomp = pcr_ncomp)),
+  p = pcr_ncomp + 1
+)
+postResample(pred = test_results$pcr, obs = test_results$actual)
+```
+
+According to PCR, the best number of components is 17 - which is almost the entire amount of numeric variables (18), while the model's metrics remain consistent with the original OLS model. 
+
+The graph shows that there is a significant drop in RMSEP after the first component, indicating that the first component (according to the original model, poverty) has the strongest explanatory power and accounts for most of the model's variance. 
+
+Now PLS will be attempted. 
+```{r pls}
+pls_fit <- plsr(Food_Insecurity_Rate_. ~ .,
+                data = pcr_train_df,
+                scale = FALSE, validation = "CV")
+
+pls_cv <- drop(RMSEP(pls_fit, estimate = "CV")$val[1, 1, -1])
+pls_ncomp <- pls::selectNcomp(pls_fit, method = "onesigma", plot = TRUE)
+cat("Best number of components (PLS):", pls_ncomp, "\n")
+
+register_model(
+  name = "pls",
+  pred = drop(predict(pls_fit, newdata = pcr_test_df, ncomp = pls_ncomp)),
+  p = pls_ncomp + 1
+)
+postResample(pred = test_results$pls, obs = test_results$actual)
+```
+
+From the graph we can see that, differently from the PCR graph, the first 4 components have more explanatory power, and are the best number of components according to this method. 
+
+The model's metrics are similar to the original OLS model, but the R squared is slightly smaller. 
+
+### - models' comparison
+
+
+```{r compare_models_mae}
+#Mean Absolute Error for all models
+mae_results <- apply(test_results[-1], 2, function(x) mean(abs(x - test_results$actual)))
+
+sort(mae_results)
+
+mae_df <- data.frame(Model = names(mae_results), MAE = mae_results)
+ggplot(mae_df, aes(x = reorder(Model, MAE), y = MAE)) +
+  geom_bar(stat = "identity", fill = "steelblue") +
+  coord_flip() +
+  labs(title = "Model Comparison (Test MAE, log price)", x = "Model", y = "MAE") +
+  theme_minimal()
+```
+
+The MAE is consistent across models; poverty is the main predictor across different models, with other few relevant variables - but still with smaller impacts - almost dominates the increase or decrease of food insecurity rates in countries affected by war.  
+
+### - neural network
+To broaden the scope of the project and to try different methods that could improve prediction, a simple neural network for regression will be developed.
+```{r neural_network}
+set.seed(240603)
+
+ctrl_reg <- trainControl(
+  method = "repeatedcv",
+  number = 5,
+  repeats = 1
+)
+
+nn_fit <- train(
+  ModelF,       #ModelF, already with feature engineering done and standardized 
+  data = training,
+  method = "nnet",
+  metric = "RMSE",
+  preProcess = c("center", "scale"),
+  trControl = trainControl(method = "repeatedcv", number = 5, repeats = 1),
+  tuneGrid = expand.grid(
+    size  = c(3, 5),
+    decay = c(0, 0.01, 0.1)
+  ),
+  trace  = FALSE,
+  linout = TRUE,
+  maxit  = 300,
+  MaxNWts = 2000
+)
+
+nn_fit
+
+#evaluation on test set
+nn_pred <- predict(nn_fit, newdata = testing)
+
+as_tibble_row(postResample(pred = nn_pred, 
+                           obs = testing$Food_Insecurity_Rate_.)) |> 
+  mutate(Model = "Neural Network", .before = 1)
+
+#register the model
+register_model(
+  name = "neural_net",
+  pred = predict(nn_fit, newdata = testing),
+  p    = nn_fit$bestTune$size
+)
+postResample(pred = test_results$neural_net, obs = test_results$actual)
+```
+
+
+Plotting the results on predicted vs observed.
+```{r plot-predicted-vs-observed}
+tibble(
+  observed  = testing$Food_Insecurity_Rate_.,
+  predicted = nn_pred) |> 
+  ggplot(aes(x = observed, y = predicted)) +
+  geom_point(alpha = 0.4, color = "lightgreen") +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", 
+              color = "firebrick") +
+  labs(
+    title    = "Neural Network: Predicted vs Observed",
+    subtitle = "Response: Food Insecurity Rate",
+    x = "Observed", y = "Predicted"
+  ) +
+  theme_minimal()
+```
+
+The neural network here developed, compared to the other models, has a higher R2, of approximately 66%, which is a significant improvement compared to the constant 54% of all the previous models. The MAE and RMSE are also lower, indicating a lower error.
+The neural network suggest a good improvement in capturing the non-linear relationships between the predictors and food insecurity rate. 
+
+The graph also shows that the model seems to correctly capture the general trend, while struggling to correctly predict the extreme values present in the upper part of the visualization. 
+
+In conclusion, the OLS, regularization and dimensionality reduction models did not differ among each other, having a stable 54% of variance explainated. The driving predictors for food insecurity are poverty-related variables. The neural network was the only method that showed significant improvement, explaining around 66% of variance.
+This suggests that, to account for the complexity of the variables and their relationship, especially when predicting what influences food insecurity, non-linear models are needed.  
